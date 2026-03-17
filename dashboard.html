@@ -1,0 +1,1017 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hanshin AI-Ops Dashboard v6</title>
+    
+    <!-- 1. Technical Fix (Critical): 腳本全部移至 head 最上方 -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/prop-types@15.8.1/prop-types.js"></script>
+    <script src="https://unpkg.com/recharts@2.12.0/umd/Recharts.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            background-color: #f8fafc; /* 淺灰色背景，符合 v6 截圖 */
+            color: #1e293b;
+            margin: 0;
+            overflow-x: hidden;
+        }
+
+        /* Loading 動畫 */
+        .spinner {
+            border: 3px solid rgba(59, 130, 246, 0.1);
+            border-top: 3px solid #3b82f6;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* 隱藏原生卷軸，使用定製化卷軸 */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+
+        /* 漸入動畫 */
+        .animate-fade-in {
+            animation: fadeIn 0.4s ease-out forwards;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        /* Recharts 文字強制深色覆蓋 */
+        .recharts-cartesian-axis-tick-value,
+        .recharts-legend-item-text,
+        .recharts-label {
+            fill: #475569 !important;
+            color: #475569 !important;
+            font-weight: 500 !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // 千分位格式化
+        const formatNum = (v) => {
+            if (typeof v === 'string') return v;
+            return new Intl.NumberFormat('zh-TW').format(v);
+        };
+
+        // 財務標準檢查：嚴格 ±5% 變動顏色邏輯
+        const getGrowthColor = (change, isExpense) => {
+            if (change >= -5 && change <= 5) return 'text-gray-500'; // ±5% 內一律灰色
+            
+            const isPositive = change > 0;
+            if (isExpense) {
+                // 費用：減少 (>5%) 是好事 (綠色)，增加 (>5%) 是壞事 (紅色)
+                return !isPositive ? 'text-emerald-500' : 'text-rose-500'; 
+            }
+            // 收入/淨利：增加 (>5%) 是好事 (綠色)，減少 (>5%) 是壞事 (紅色)
+            return isPositive ? 'text-emerald-500' : 'text-rose-500'; 
+        };
+
+        // 動態文字染色引擎：規則自動判斷顏色
+        // type: 'expense' | 'revenue' | 'profit'
+        // value: 實際變動金額（正數=增加，負數=減少）
+        const formatAnalysisText = (type, value, text) => {
+            const isPositive = value > 0;
+            let colorClass;
+            if (type === 'expense') {
+                // 費用：增加為紅，減少為綠
+                colorClass = isPositive ? 'font-bold text-rose-600' : 'font-bold text-emerald-600';
+            } else {
+                // 收入/淨利：增加為綠，減少為紅
+                colorClass = isPositive ? 'font-bold text-emerald-600' : 'font-bold text-rose-600';
+            }
+            return <span className={colorClass}>{text}</span>;
+        };
+
+        // 組件：五環 KPIs (圓環設計)
+        const KPIRing = ({ title, value, rate, change, isExpense, tooltip }) => {
+            const growthColor = getGrowthColor(change, isExpense);
+            const valueStr = typeof value === 'number' ? formatNum(value) : value;
+            const changeSign = change > 0 ? '+' : '';
+
+            return (
+                <div className="flex justify-center flex-shrink-0 relative group">
+                    <div className="w-52 h-52 rounded-full border-[6px] border-[#e8f5e9] bg-white flex flex-col items-center justify-center shadow-lg shadow-emerald-900/5 relative overflow-hidden transition-transform duration-300 hover:scale-105">
+                        <div className="absolute inset-0 rounded-full border border-emerald-500/10 m-[2px]"></div>
+                        <h4 className="text-sm font-semibold text-gray-600 mb-1">{title}</h4>
+                        <p className="text-2xl font-black text-gray-900 mb-0.5 tracking-tight">{valueStr}</p>
+                        <span className="text-[10px] text-gray-400 font-medium mb-3">百萬元</span>
+                        
+                        {rate !== undefined && change !== undefined && (
+                            <div className="flex items-center gap-3 text-[11px] font-bold w-full mx-auto justify-center">
+                                <div className="flex flex-col items-center">
+                                    <span className="text-[9px] text-gray-400 font-medium leading-none">達成</span>
+                                    {/* 費用達成率 < 95% 為綠色，其他預設灰色/深色 */}
+                                    <span className={`mt-1 ${(isExpense && title.includes('營業費用') && rate < 95) ? 'text-emerald-500' : 'text-gray-700'}`}>{rate.toFixed(1)}%</span>
+                                </div>
+                                <div className="w-[1px] h-6 bg-gray-200"></div>
+                                <div className="flex flex-col items-center">
+                                    <span className="text-[9px] text-gray-400 font-medium leading-none">成長</span>
+                                    <span className={`mt-1 ${growthColor}`}>{changeSign}{change.toFixed(1)}%</span>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    {/* Tooltip */}
+                    {tooltip && (
+                        <div className="absolute top-[-10px] left-1/2 transform -translate-x-1/2 -translate-y-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 w-52 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-xl shadow-slate-900/20 border border-slate-700/50">
+                            {tooltip.split('\n').map((line, i) => (
+                                <div key={i} className={i > 0 ? 'mt-1 pt-1 border-t border-slate-700/50' : ''}>{line}</div>
+                            ))}
+                            <div className="absolute bottom-[-5px] left-1/2 transform -translate-x-1/2 w-2 h-2 bg-slate-800 rotate-45 border-r border-b border-slate-700/50"></div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const EPSRing = ({ title, value, tooltip }) => (
+            <div className="flex justify-center flex-shrink-0 relative group">
+                <div className="w-52 h-52 rounded-full border-[6px] border-[#e8f5e9] bg-white flex flex-col items-center justify-center shadow-lg shadow-emerald-900/5 relative transition-transform duration-300 hover:scale-105">
+                    <div className="absolute inset-0 rounded-full border border-emerald-500/10 m-[2px]"></div>
+                    <h4 className="text-sm font-semibold text-gray-600 mb-2">{title}</h4>
+                    <p className="text-4xl font-black text-gray-900 mb-1 tracking-tight">{value}</p>
+                    <span className="text-xs text-gray-400 font-medium">元</span>
+                </div>
+                {/* Tooltip */}
+                {tooltip && (
+                    <div className="absolute top-[-10px] left-1/2 transform -translate-x-1/2 -translate-y-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 w-64 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-xl shadow-slate-900/20 border border-slate-700/50">
+                        {tooltip}
+                        <div className="absolute bottom-[-5px] left-1/2 transform -translate-x-1/2 w-2 h-2 bg-slate-800 rotate-45 border-r border-b border-slate-700/50"></div>
+                    </div>
+                )}
+            </div>
+        );
+
+        // 組件：三柱對比圖表
+        // 組件：三柱對比圖表
+        const BarComparison = ({ title, data }) => {
+            if (!window.Recharts) return <div className="text-gray-400 text-sm p-4 text-center">圖表庫載入中...</div>;
+            const { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } = window.Recharts;
+            return (
+                <div className="flex flex-col w-full">
+                    <h4 className="text-center font-bold text-gray-700 mb-6 text-sm relative">
+                        {title}
+                    </h4>
+                    
+                    <div className="h-[320px] w-full relative">
+                        
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 20 }} barGap={8}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 12, fontWeight: 500}} dy={15} interval={0} />
+                                <YAxis axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 11}} tickFormatter={(v) => formatNum(v)} />
+                                <Tooltip 
+                                    itemStyle={{ color: '#475569', fontWeight: 600 }} contentStyle={{ borderRadius: '8px' }} 
+                                    cursor={{ fill: '#f1f5f9' }}
+                                    formatter={(value, name) => [`${formatNum(value)} 百萬元`, name]}
+                                />
+                                <Legend 
+                                    verticalAlign="top" 
+                                    align="center" 
+                                    wrapperStyle={{ paddingBottom: '25px', fontSize: '12px', color: '#64748b' }} 
+                                    iconType="square" 
+                                    iconSize={8} 
+                                />
+                                <Bar dataKey="113年同期" fill="#cbd5e1" radius={[4, 4, 0, 0]} maxBarSize={45} />
+                                <Bar dataKey="實際" fill="#10b981" radius={[4, 4, 0, 0]} maxBarSize={45} />
+                                <Bar dataKey="預算" fill="#3b82f6" radius={[4, 4, 0, 0]} maxBarSize={45} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            );
+        };
+
+        // 組件：五年營運趨勢圖表
+        const TrendLineChart = ({ data }) => {
+            if (!window.Recharts) return <div className="text-gray-400 text-sm p-4 text-center">圖表庫載入中...</div>;
+            const { ResponsiveContainer, ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Label } = window.Recharts;
+            const ChartCard = ({ title, lines, showBar = false }) => (
+                <div className="w-full bg-white rounded-2xl p-6 border border-gray-100 shadow-sm relative">
+                    <h4 className="text-center font-bold text-gray-700 mb-6 text-sm">{title}</h4>
+                    <div className="h-[280px] w-full relative">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <ComposedChart data={data} margin={{ top: showBar ? 60 : 40, right: 20, left: 10, bottom: 40 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis dataKey="year" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 12, fontWeight: 500}} dy={15} interval={0} angle={-45} textAnchor="end" padding={{ left: 10, right: 20 }} height={60} />
+                                <YAxis axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 11}} tickFormatter={(v) => formatNum(v)} width={80} domain={['auto', 'auto']}  />
+                                <Tooltip 
+                                    itemStyle={{ color: '#475569', fontWeight: 600 }} contentStyle={{ borderRadius: '8px' }} 
+                                    cursor={{stroke: '#e2e8f0', strokeWidth: 1, strokeDasharray: '3 3'}}
+                                    formatter={(value, name) => {
+                                        const displayName = typeof name === 'string' ? name.replace('_預估', ' (執行中)') : name;
+                                        return [`${formatNum(value)} 百萬元`, displayName];
+                                    }}
+                                />
+                                {(lines.length > 1 || showBar) && (
+                                    <Legend 
+                                        verticalAlign="top" 
+                                        align="center" 
+                                        wrapperStyle={{ top: showBar ? 0 : undefined, paddingBottom: '15px', fontSize: '12px', color: '#64748b' }} 
+                                        iconType="circle" 
+                                        iconSize={8}
+                                        formatter={(value) => <span style={{ color: '#374151', fontWeight: 500 }}>{value}</span>}
+                                        {...(showBar && {
+                                            payload: [
+                                                { value: '淨利差額', type: 'rect', color: '#94a3b8' },
+                                                { value: '營業淨利', type: 'line', color: '#34d399' },
+                                                { value: '稅後淨利', type: 'line', color: '#3b82f6' }
+                                            ]
+                                        })}
+                                    />
+                                )}
+                                {showBar && (
+                                    <Bar dataKey="差額" name="淨利差額" fill="#64748b" fillOpacity={0.2} barSize={20} radius={[4, 4, 0, 0]} />
+                                )}
+                                {lines.map((line) => (
+                                    <React.Fragment key={line.dataKey}>
+                                        <Line type="monotone" dataKey={line.dataKey} name={line.dataKey} stroke={line.color} strokeWidth={3} dot={{r: 4, strokeWidth: 2}} activeDot={{r: 6}} />
+                                        <Line type="monotone" dataKey={`${line.dataKey}_預估`} name={`${line.dataKey}_預估`} stroke={line.color} strokeWidth={3} strokeDasharray="6 6" dot={{r: 4, strokeWidth: 2, fill: '#fff'}} activeDot={{r: 6}} legendType="none" />
+                                    </React.Fragment>
+                                ))}
+                            </ComposedChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="flex flex-col w-full">
+                    <h2 className="text-2xl font-bold flex items-center gap-3 mb-8 text-gray-800 border-l-4 border-[#2563eb] pl-4">
+                        <i data-lucide="trending-up" className="w-6 h-6 text-blue-600"></i>
+                        過去五年營運趨勢 (百萬元)
+                    </h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <ChartCard title="營業收入趨勢（百萬元）" lines={[{ dataKey: "營業收入", color: "#3b82f6" }]} />
+                        <ChartCard title="營業費用趨勢（百萬元）" lines={[{ dataKey: "營業費用", color: "#94a3b8" }]} />
+                        <ChartCard title="淨利趨勢（百萬元）" showBar={true} lines={[
+                            { dataKey: "營業淨利", color: "#34d399" }, // emerald-400
+                            { dataKey: "稅後淨利", color: "#3b82f6" }  // blue-500
+                        ]} />
+                    </div>
+                </div>
+            );
+        };
+
+        // 營運現況儀表板 (Page 2)
+        const OperationDashboard = () => {
+            if (!window.Recharts) return <div className="text-gray-400 text-sm p-4 text-center">圖表庫載入中...</div>;
+            const { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } = window.Recharts;
+            
+            // 單位：元 (客單價)
+            const ticketData = [
+                { name: '本館', '實際': 6991, '預算': 7000, '113年同期': 6571 },
+                { name: '巨蛋', '實際': 1594, '預算': 1650, '113年同期': 1644 }
+            ];
+            
+            // 單位：千人 (來客數)
+            const visitorData = [
+                { name: '本館', '實際': 2799, '預算': 2601, '113年同期': 2976 },
+                { name: '巨蛋', '實際': 13774, '預算': 13500, '113年同期': 13335 }
+            ];
+
+            const StatCard = ({ title, actual, budget, achRate, yoyRate, yoyValue, unit }) => {
+                const achColor = achRate > 105 ? 'text-emerald-500' : achRate < 95 ? 'text-rose-500' : 'text-gray-500';
+                const yoyColor = yoyRate > 5 ? 'text-emerald-500' : yoyRate < -5 ? 'text-rose-500' : 'text-gray-500';
+                const achSign = achRate > 100 ? '+' : '';
+                return (
+                    <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm hover:shadow-md transition-shadow duration-200 flex flex-col justify-between relative group cursor-pointer">
+                        <div className="text-gray-500 text-sm font-semibold mb-2">{title}</div>
+                        <div className="flex items-baseline gap-1 mb-4">
+                            <span className="text-3xl font-black text-gray-800">{formatNum(actual)}</span>
+                            <span className="text-sm text-gray-500">{unit}</span>
+                        </div>
+                        <div className="space-y-2 text-sm">
+                            <div className="flex justify-between">
+                                <span className="text-gray-500">預算達成</span>
+                                <span className={`font-semibold ${achColor}`}>{achRate.toFixed(2)}%</span>
+                            </div>
+                            <div className="flex justify-between pt-1.5 border-t border-gray-50">
+                                <span className="text-gray-500">同期成長</span>
+                                <span className={`font-semibold ${yoyColor}`}>{yoyRate > 0 ? '+' : ''}{yoyRate.toFixed(2)}%</span>
+                            </div>
+                        </div>
+                        {/* Hover Tooltip */}
+                        <div className="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">
+                            <div className="font-bold mb-0.5">預算目標：{formatNum(budget)} {unit}</div>
+                            <div className="font-bold">去年同期：{formatNum(yoyValue)} {unit}</div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const OpChartCard = ({ title, data, unit, CustomTooltipFormatter }) => (
+                <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm">
+                    <h4 className="text-center font-bold text-gray-700 mb-6 text-sm">{title}</h4>
+                    <div className="h-[280px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={data} barGap={8} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 13, fontWeight: 500}} dy={10} interval={0} />
+                                <YAxis axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 11}} tickFormatter={(v) => formatNum(v)} width={50} />
+                                <Tooltip 
+                                    itemStyle={{ color: '#475569', fontWeight: 600 }} contentStyle={{ borderRadius: '8px' }}
+                                    cursor={{ fill: '#f1f5f9' }}
+                                    formatter={CustomTooltipFormatter}
+                                    labelStyle={{ color: '#475569', fontWeight: 600, marginBottom: '8px' }}
+                                />
+                                <Legend 
+                                    verticalAlign="top" 
+                                    wrapperStyle={{ paddingBottom: '20px', fontSize: '12px', color: '#64748b' }} 
+                                    iconType="circle" 
+                                    iconSize={8}
+                                    formatter={(value) => <span style={{ color: '#374151', fontWeight: 500 }}>{value}</span>}
+                                />
+                                <Bar dataKey="113年同期" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={24} />
+                                <Bar dataKey="實際" fill="#10b981" radius={[4, 4, 0, 0]} barSize={24} />
+                                <Bar dataKey="預算" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={24} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="animate-fade-in w-full">
+                    {/* 標題與 checkbox 狀態 */}
+                    <div className="mb-8">
+                        <h2 className="text-2xl font-black text-gray-900 mb-4 tracking-tight">營運現況</h2>
+                        <h3 className="text-lg font-bold text-gray-800 border-l-4 border-emerald-600 pl-3 mb-6">
+                            營業面：[本館&巨蛋] 持續增加營收
+                        </h3>
+                    </div>
+
+                    {/* 四格 KPI 數據卡 */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
+                        <StatCard title="本館客單價" actual={6991} budget={7000} achRate={99.87} yoyRate={6.33} yoyValue={6571} unit="元" />
+                        <StatCard title="巨蛋客單價" actual={1594} budget={1650} achRate={96.61} yoyRate={-3.04} yoyValue={1644} unit="元" />
+                        <StatCard title="本館來客數" actual={2799} budget={2601} achRate={107.61} yoyRate={-5.95} yoyValue={2976} unit="千人" />
+                        <StatCard title="巨蛋來客數" actual={13774} budget={13500} achRate={102.03} yoyRate={3.29} yoyValue={13335} unit="千人" />
+                    </div>
+
+                    {/* 雙柱狀圖對比 */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
+                        <OpChartCard title="客單價對比 (元)" data={ticketData} CustomTooltipFormatter={(value, name) => [`${formatNum(value)} 元`, name]} />
+                        <OpChartCard title="來客數對比 (千人)" data={visitorData} CustomTooltipFormatter={(value, name) => [`${formatNum(value)} 千人`, name]} />
+                    </div>
+
+                    {/* 底部營運小結 */}
+                    <div className="bg-gray-50 rounded-xl p-6 border border-gray-100 text-sm text-gray-600 leading-relaxed shadow-sm">
+                        <h4 className="font-bold text-gray-800 mb-2">營運分析備註：</h4>
+                        <ul className="list-disc pl-5 space-y-1">
+                            <li>巨蛋客單價減少主係113年超市改裝，帶動低單價高頻次消費人潮，稀釋整體平均客單價。</li>
+                            <li>同期預算比較中，巨蛋已排除台中數據以維持基礎比較基準一致性。</li>
+                        </ul>
+                    </div>
+                </div>
+            );
+        };
+
+        // 獲利面儀表板 (Page 3)
+        const FinalExpenseDashboard = () => {
+
+            if (!window.Recharts) return <div className="text-gray-400 text-sm p-4 text-center">圖表庫載入中...</div>;
+            const { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } = window.Recharts;
+
+            // 獨立組件：營運分析備註 (避免圖表閃爍)
+            const ExpenseNotes = () => {
+                const [activeNoteTab, setActiveNoteTab] = React.useState('budget');
+                return (
+                    <div className="bg-[#f1f5f9] rounded-2xl p-6 lg:p-8 mb-10 border border-gray-200 shadow-sm relative">
+                        <div className="flex items-center gap-2 mb-6">
+                            <i data-lucide="edit" className="w-5 h-5 text-gray-600"></i>
+                            <h3 className="font-bold text-gray-800 text-lg">營運分析備註</h3>
+                        </div>
+                        <div className="flex gap-2 mb-6 border-b border-gray-200 pb-4">
+                            <button onClick={() => setActiveNoteTab('budget')} className={`px-6 py-2 rounded-full text-sm font-semibold transition-colors shadow-sm ${activeNoteTab === 'budget' ? 'bg-[#2e7d32] text-white' : 'bg-gray-200/80 text-gray-600 hover:bg-gray-300'}`}>與預算比</button>
+                            <button onClick={() => setActiveNoteTab('yoy')} className={`px-6 py-2 rounded-full text-sm font-semibold transition-colors shadow-sm ${activeNoteTab === 'yoy' ? 'bg-[#2e7d32] text-white' : 'bg-gray-200/80 text-gray-600 hover:bg-gray-300'}`}>與同期實際數比</button>
+                        </div>
+                        <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm">
+                            <div className="grid">
+                                <div className={`col-start-1 row-start-1 transition-opacity duration-300 ${activeNoteTab === 'budget' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                                    <div className="space-y-5">
+                                        {/* 前置說明 */}
+                                        <div className="bg-amber-50 border-l-4 border-amber-500 p-3 mb-4 rounded-r-md text-amber-900 text-sm">
+                                            <p>
+                                                <span className="font-bold">財務分析基準說明：</span>
+                                                本年度（114年）預算基準為 3,215 百萬元。
+                                                <br/>
+                                                本分析均<span className="font-bold text-amber-700">不含台中</span>。排除台中 205 百萬元，調整後基準為 3,009 百萬元。
+                                            </p>
+                                        </div>
+                                        <p className="font-bold text-slate-800 text-sm">114年度營業費用較預算<span className="text-emerald-700"> 減少 29 百萬元</span>，主要差異如下：</p>
+
+                                        {/* ① 本館 */}
+                                        <div className="border-l-2 border-gray-200 pl-4">
+                                            <p className="text-sm font-bold text-slate-700 mb-2">① 本館 — 較預算<span className="text-emerald-700"> 減少 63 百萬元</span></p>
+                                            <div className="space-y-0">
+                                                {[['人事費用', '減少 13 百萬元'], ['信用卡手續費', '減少 6 百萬元'], ['清潔費', '增加 2 百萬元'], ['廣告費', '減少 15 百萬元'], ['電費', '減少 21 百萬元'], ['加抽租金', '減少 10 百萬元']].map(([label, amount], i) => (
+                                                    <div key={i} className="flex justify-between items-center py-1 border-b border-gray-100 hover:bg-slate-50 transition-colors px-2">
+                                                        <span className="text-slate-600">{label}</span>
+                                                        <span className="text-slate-800 font-bold text-sm">
+                                                            {amount.includes('增加') && <span className="text-emerald-500 font-black mr-1">↑</span>}
+                                                            {amount.includes('減少') && <span className="text-rose-500 font-black mr-1">↓</span>}
+                                                            {amount.replace('增加 ', '').replace('減少 ', '')}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {/* ② 巨蛋 */}
+                                        <div className="border-l-2 border-gray-200 pl-4">
+                                            <p className="text-sm font-bold text-slate-700 mb-2">② 巨蛋 — 較預算<span className="text-rose-700"> 增加 33 百萬元</span></p>
+                                            <div className="space-y-0">
+                                                {[['人事費用', '減少 7 百萬元'], ['總部費用及技術指導', '增加 26 百萬元'], ['信用卡費用', '增加 4 百萬元'], ['電費', '減少 23 百萬元'], ['修繕費', '增加 12 百萬元'], ['系統維護費', '增加 3 百萬元'], ['其他費用', '增加 12 百萬元']].map(([label, amount], i) => (
+                                                    <div key={i} className="flex justify-between items-center py-1 border-b border-gray-100 hover:bg-slate-50 transition-colors px-2">
+                                                        <span className="text-slate-600">{label}</span>
+                                                        <span className="text-slate-800 font-bold text-sm">
+                                                            {amount.includes('增加') && <span className="text-emerald-500 font-black mr-1">↑</span>}
+                                                            {amount.includes('減少') && <span className="text-rose-500 font-black mr-1">↓</span>}
+                                                            {amount.replace('增加 ', '').replace('減少 ', '')}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className={`col-start-1 row-start-1 transition-opacity duration-300 ${activeNoteTab === 'yoy' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                                    <div className="space-y-5">
+                                        <p className="font-bold text-slate-800 text-sm">114年營業費用較同期<span className="text-emerald-700"> 減少 80 百萬元</span>，主要差異如下：</p>
+
+                                        {/* ① 本館 */}
+                                        <div className="border-l-2 border-gray-200 pl-4">
+                                            <p className="text-sm font-bold text-slate-700 mb-2">① 本館 — 較同期<span className="text-emerald-700"> 減少 13 百萬元</span></p>
+                                            <div className="space-y-0">
+                                                {[['人事費用', '減少 6 百萬元'], ['信用卡手續費', '減少 9 百萬元'], ['廣告費', '減少 6 百萬元'], ['修繕費', '增加 5 百萬元'], ['系統維護費', '增加 5 百萬元']].map(([label, amount], i) => (
+                                                    <div key={i} className="flex justify-between items-center py-1 border-b border-gray-100 hover:bg-slate-50 transition-colors px-2">
+                                                        <span className="text-slate-600">{label}</span>
+                                                        <span className="text-slate-800 font-bold text-sm">
+                                                            {amount.includes('增加') && <span className="text-emerald-500 font-black mr-1">↑</span>}
+                                                            {amount.includes('減少') && <span className="text-rose-500 font-black mr-1">↓</span>}
+                                                            {amount.replace('增加 ', '').replace('減少 ', '')}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {/* ② 巨蛋 */}
+                                        <div className="border-l-2 border-gray-200 pl-4">
+                                            <p className="text-sm font-bold text-slate-700 mb-2">② 巨蛋 — 較去年<span className="text-rose-700"> 增加 93 百萬元</span></p>
+                                            <div className="space-y-0">
+                                                {[['人事費用', '增加 16 百萬元'], ['總部分攤及技術指導', '增加 26 百萬元'], ['信用卡費用', '增加 5 百萬元'], ['清潔及保全', '增加 13 百萬元'], ['其他費用', '增加 8 百萬元'], ['修繕費', '增加 15 百萬元'], ['系統維護費', '增加 5 百萬元'], ['折舊攤提', '增加 3 百萬元']].map(([label, amount], i) => (
+                                                    <div key={i} className="flex justify-between items-center py-1 border-b border-gray-100 hover:bg-slate-50 transition-colors px-2">
+                                                        <span className="text-slate-600">{label}</span>
+                                                        <span className="text-slate-800 font-bold text-sm">
+                                                            {amount.includes('增加') && <span className="text-emerald-500 font-black mr-1">↑</span>}
+                                                            {amount.includes('減少') && <span className="text-rose-500 font-black mr-1">↓</span>}
+                                                            {amount.replace('增加 ', '').replace('減少 ', '')}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            const personalData = [
+                { name: '本館', '實際': 98, '預算': 112, '113年同期': 104 },
+                { name: '巨蛋', '實際': 323, '預算': 370, '113年同期': 307 }
+            ];
+            const businessData = [
+                { name: '本館', '實際': 295, '預算': 302, '113年同期': 300 },
+                { name: '巨蛋', '實際': 494, '預算': 468, '113年同期': 439 }
+            ];
+            const marketingData = [
+                { name: '本館', '實際': 62, '預算': 79, '113年同期': 72 },
+                { name: '巨蛋', '實際': 118, '預算': 196, '113年同期': 123 }
+            ];
+            const facilityData = [
+                { name: '本館', '實際': 737, '預算': 762, '113年同期': 729 },
+                { name: '巨蛋', '實際': 854, '預算': 926, '113年同期': 826 }
+            ];
+            const totalExpenseData = [
+                { name: '設備費用', '實際': 1591, '預算': 1688, '113年同期': 1556 },
+                { name: '事務費用', '實際': 788, '預算': 769, '113年同期': 738 },
+                { name: '人事費用', '實際': 421, '預算': 482, '113年同期': 411 },
+                { name: '行銷費用', '實際': 180, '預算': 275, '113年同期': 195 }
+            ];
+
+            /* 組件已整合至主回傳塊，移除舊定義以清空版面 */
+            const ExpenseChart = ({ title, data }) => (
+                <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm text-sm">
+                    <h4 className="text-center font-bold text-gray-700 mb-6 text-sm">{title} (百萬元)</h4>
+                    <div className="h-[250px] w-full">
+                        <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 13, fontWeight: 500}} dy={10} />
+                                <YAxis axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 11}} tickFormatter={(v) => formatNum(v)} width={40} />
+                                <Tooltip 
+                                    itemStyle={{ color: '#475569', fontWeight: 600 }} contentStyle={{ borderRadius: '8px' }}
+                                    cursor={{ fill: '#f1f5f9' }}
+                                    formatter={(value, name) => [`${formatNum(value)} 百萬元`, name]}
+                                    labelStyle={{ color: '#475569', fontWeight: 600, marginBottom: '8px' }}
+                                />
+                                <Legend 
+                                    verticalAlign="top" 
+                                    wrapperStyle={{ paddingBottom: '20px', fontSize: '11px', color: '#64748b' }} 
+                                    iconType="circle" 
+                                    iconSize={6}
+                                    formatter={(value) => <span style={{ color: '#374151', fontWeight: 500 }}>{value}</span>}
+                                />
+                                <Bar dataKey="113年同期" fill="#cbd5e1" radius={[4, 4, 0, 0]} barSize={24} isAnimationActive={false} />
+                                <Bar dataKey="實際" fill="#10b981" radius={[4, 4, 0, 0]} barSize={24} isAnimationActive={false} />
+                                <Bar dataKey="預算" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={24} isAnimationActive={false} />
+                            </BarChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+            );
+
+            return (
+                <div className="animate-fade-in w-full">
+                        <div className="mb-8">
+                            <h2 className="text-2xl font-black text-gray-900 mb-4 tracking-tight">營運現況</h2>
+                            <h3 className="text-lg font-bold text-gray-800 border-l-4 border-emerald-600 pl-3 mb-6">
+                                營運面：針對可再控制的費用進行探討
+                            </h3>
+                        </div>
+
+                        {/* 三欄式 KPI 卡片 (3-Column Grid with Total) */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+                            {/* 合計營運表現 */}
+                            <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm border-t-4 border-indigo-600 hover:shadow-md transition-shadow duration-200">
+                                <h3 className="text-lg font-black text-indigo-700 mb-6 flex items-center gap-2">
+                                    <i data-lucide="sigma" className="w-5 h-5"></i>
+                                    合計營運表現
+                                </h3>
+                                
+                                <div className="flex flex-col">
+                                    <div className="text-gray-400 text-xs font-bold mb-1 uppercase tracking-wider">營業費用總額</div>
+                                    <div className="flex items-baseline gap-1 mb-4">
+                                        <span className="text-3xl font-black text-gray-800">2,980</span>
+                                        <span className="text-sm text-gray-500 font-medium">百萬元</span>
+                                    </div>
+                                    <div className="space-y-1.5 text-sm mt-2">
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">預算達成</span>
+                                            <span className="font-bold text-emerald-500">92.70%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">預算目標：3,215 百萬元</div>
+                                        </div>
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">同期變化</span>
+                                            <span className="font-medium text-gray-500">+2.77%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">去年同期：2,900 百萬元</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <hr className="my-5 border-t border-dashed border-gray-300" />
+
+                                <div className="flex flex-col">
+                                    <div className="text-gray-400 text-xs font-bold mb-1 uppercase tracking-wider">平均營業費用率</div>
+                                    <div className="flex items-baseline gap-1 mb-4">
+                                        <span className="text-3xl font-black text-gray-800">10.37%</span>
+                                    </div>
+                                    <div className="space-y-1.5 text-sm mt-2">
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">預算達成</span>
+                                            <span className="font-medium text-gray-500">95.57%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">預算目標：10.85%</div>
+                                        </div>
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">同期變化</span>
+                                            <span className="font-medium text-gray-500">+2.42%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">去年同期：10.12%</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* 本館營運表現 */}
+                            <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm hover:shadow-md transition-shadow duration-200">
+                                <h3 className="text-lg font-extrabold text-gray-700 mb-6 border-l-4 border-emerald-500 pl-3 flex items-center">
+                                    <i data-lucide="building" className="w-5 h-5 mr-2 text-emerald-600"></i>
+                                    本館營運表現
+                                </h3>
+                                
+                                <div className="flex flex-col">
+                                    <div className="text-gray-400 text-xs font-bold mb-1 uppercase tracking-wider">本館營業費用</div>
+                                    <div className="flex items-baseline gap-1 mb-4">
+                                        <span className="text-3xl font-black text-gray-800">1,192</span>
+                                        <span className="text-sm text-gray-500 font-medium">百萬元</span>
+                                    </div>
+                                    <div className="space-y-1.5 text-sm mt-2">
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">預算達成</span>
+                                            <span className="font-bold text-emerald-500">95.01%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">預算目標：1,255 百萬元</div>
+                                        </div>
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">同期變化</span>
+                                            <span className="font-medium text-gray-500">-1.08%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">去年同期：1,205 百萬元</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <hr className="my-5 border-t border-dashed border-gray-300" />
+
+                                <div className="flex flex-col">
+                                    <div className="text-gray-400 text-xs font-bold mb-1 uppercase tracking-wider">本館營業費用率</div>
+                                    <div className="flex items-baseline gap-1 mb-4">
+                                        <span className="text-3xl font-black text-gray-800">10.95%</span>
+                                    </div>
+                                    <div className="space-y-1.5 text-sm mt-2">
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">預算達成</span>
+                                            <span className="font-medium text-gray-500">98.13%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">預算目標：11.16%</div>
+                                        </div>
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">同期變化</span>
+                                            <span className="font-medium text-gray-500">+3.74%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">去年同期：10.56%</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* 巨蛋營運表現 */}
+                            <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm hover:shadow-md transition-shadow duration-200">
+                                <h3 className="text-lg font-extrabold text-gray-700 mb-6 border-l-4 border-emerald-500 pl-3 flex items-center">
+                                    <i data-lucide="building-2" className="w-5 h-5 mr-2 text-emerald-600"></i>
+                                    巨蛋營運表現
+                                </h3>
+                                
+                                <div className="flex flex-col">
+                                    <div className="text-gray-400 text-xs font-bold mb-1 uppercase tracking-wider">巨蛋營業費用</div>
+                                    <div className="flex items-baseline gap-1 mb-4">
+                                        <span className="text-3xl font-black text-gray-800">1,788</span>
+                                        <span className="text-sm text-gray-500 font-medium">百萬元</span>
+                                    </div>
+                                    <div className="space-y-1.5 text-sm mt-2">
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">預算達成</span>
+                                            <span className="font-bold text-emerald-500">91.23%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">預算目標：1,960 百萬元</div>
+                                        </div>
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">同期變化</span>
+                                            <span className="font-bold text-rose-500">+5.50%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">去年同期：1,695 百萬元</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <hr className="my-5 border-t border-dashed border-gray-300" />
+
+                                <div className="flex flex-col">
+                                    <div className="text-gray-400 text-xs font-bold mb-1 uppercase tracking-wider">巨蛋營業費用率</div>
+                                    <div className="flex items-baseline gap-1 mb-4">
+                                        <span className="text-3xl font-black text-gray-800">10.01%</span>
+                                    </div>
+                                    <div className="space-y-1.5 text-sm mt-2">
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">預算達成</span>
+                                            <span className="font-bold text-emerald-500">89.83%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">預算目標：11.14%</div>
+                                        </div>
+                                        <div className="flex justify-between items-center py-1 group relative cursor-pointer">
+                                            <span className="text-gray-500">同期變化</span>
+                                            <span className="font-medium text-gray-500">+1.79%</span>
+                                            <div className="absolute bottom-full right-0 mb-1 hidden group-hover:block group-active:block bg-gray-800 text-white text-xs rounded py-1 px-2 z-10 whitespace-nowrap shadow-lg">去年同期：9.83%</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* 營運分析備註 (獨立組件避免重繪) */}
+                        <ExpenseNotes />
+
+                        {/* 四大費用合計概覽橫向圖表 */}
+                        <div className="bg-white rounded-2xl p-6 border border-gray-100 shadow-sm mb-8">
+                            <h3 className="text-lg font-bold text-gray-700 mb-4">四大費用合計概覽 (百萬元)</h3>
+                            <div className="h-[380px] w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart layout="vertical" data={totalExpenseData} margin={{ top: 5, right: 30, left: 10, bottom: 5 }}>
+                                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
+                                        <XAxis type="number" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 11}} tickFormatter={(v) => formatNum(v)} />
+                                        <YAxis dataKey="name" type="category" width={72} axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 13, fontWeight: 500}} />
+                                        <Tooltip
+                                            formatter={(value) => value + ' 百萬元'}
+                                            cursor={{fill: '#f1f5f9'}}
+                                            itemStyle={{ color: '#475569', fontWeight: 600 }} contentStyle={{ borderRadius: '8px' }}
+                                        />
+                                        <Legend
+                                            verticalAlign="top"
+                                            height={36}
+                                            iconType="circle"
+                                            iconSize={8}
+                                            wrapperStyle={{ fontSize: '12px', color: '#64748b' }}
+                                            formatter={(value) => <span style={{ color: '#374151', fontWeight: 500 }}>{value}</span>}
+                                        />
+                                        <Bar dataKey="113年同期" fill="#cbd5e1" radius={[0, 4, 4, 0]} barSize={12} isAnimationActive={false} />
+                                        <Bar dataKey="實際" fill="#10b981" radius={[0, 4, 4, 0]} barSize={12} isAnimationActive={false} />
+                                        <Bar dataKey="預算" fill="#3b82f6" radius={[0, 4, 4, 0]} barSize={12} isAnimationActive={false} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </div>
+
+                        {/* 圖表佈局 (2x2 Grid) */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-10">
+                            <ExpenseChart title="人事費用對比" data={personalData} />
+                            <ExpenseChart title="事務費用對比" data={businessData} />
+                            <ExpenseChart title="行銷費用對比" data={marketingData} />
+                            <ExpenseChart title="設備費用對比" data={facilityData} />
+                        </div>
+                    </div>
+                );
+            };
+    
+        // 主容器：控制 Sidebar 與路由
+        const Dashboard = () => {
+            const [activePage, setActivePage] = React.useState('finance');
+
+            React.useEffect(() => {
+                if (window.lucide) lucide.createIcons();
+            }, [activePage]);
+
+            return (
+                <div className="flex h-screen overflow-hidden bg-[#f8fafc] animate-fade-in text-gray-800">
+                    
+                    {/* 左側深色導覽列 */}
+                    <aside className="w-64 bg-[#0f172a] text-slate-300 flex-col hidden lg:flex shadow-xl z-20 shrink-0">
+                        <div className="p-6"></div>
+                        <nav className="flex-1 mt-6">
+                            <ul className="space-y-1">
+                                <li onClick={() => setActivePage('finance')} className="cursor-pointer">
+                                    <div className={`w-full flex items-center gap-3 px-6 py-4 font-medium transition-colors ${activePage === 'finance' ? 'bg-slate-800 text-white border-l-4 border-emerald-500' : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 border-l-4 border-transparent'}`}>
+                                        <i data-lucide="layout-dashboard" className="w-5 h-5"></i>
+                                        一、整體執行現況
+                                    </div>
+                                </li>
+                                <li>
+                                    <div className={`w-full flex items-center gap-3 px-6 py-4 font-medium transition-colors ${activePage === 'operation' ? 'bg-slate-800 text-white border-l-4 border-emerald-500' : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200 border-l-4 border-transparent'}`}>
+                                        <i data-lucide="users" className="w-5 h-5"></i>
+                                        二、營運現況
+                                    </div>
+                                    <ul className="bg-[#0f172a] py-2 border-t border-slate-800/50">
+                                        <li onClick={() => setActivePage('operation')} className={`cursor-pointer pl-14 pr-6 py-2.5 text-sm font-medium transition-colors ${activePage === 'operation' ? 'text-emerald-400' : 'text-slate-400 hover:text-emerald-300'}`}>
+                                            2.1 營業面
+                                        </li>
+                                        <li onClick={() => setActivePage('expense')} className={`cursor-pointer pl-14 pr-6 py-2.5 text-sm font-medium transition-colors ${activePage === 'expense' ? 'text-emerald-400' : 'text-slate-400 hover:text-emerald-300'}`}>
+                                            2.2 營運面
+                                        </li>
+                                    </ul>
+                                </li>
+                            </ul>
+                        </nav>
+                        <div className="p-6 border-t border-slate-800/50">
+                            <p className="text-[11px] text-slate-500">漢神 AI-Ops 財務控制台 v6</p>
+                        </div>
+                    </aside>
+
+                    <main className="flex-1 overflow-y-auto w-full relative">
+                        <div className="max-w-[1400px] mx-auto px-6 lg:px-12 py-10">
+                            {activePage === 'finance' && <FinanceDashboard />}
+                            {activePage === 'operation' && <OperationDashboard />}
+                            {activePage === 'expense' && <FinalExpenseDashboard />}
+                        </div>
+                    </main>
+                </div>
+            );
+        };
+
+        // 整體執行現況儀表板 (Page 1)
+        const FinanceDashboard = () => {
+            const [activeTab, setActiveTab] = React.useState('budget');
+
+            React.useEffect(() => {
+                if (window.lucide) lucide.createIcons();
+            }, [activeTab]);
+
+            // 以圖像數據為準 (千元→百萬元)
+            // 實際/同期/預算 正確欄位
+            const revData = [{ name: '營業收入', '113年同期': 28649, '實際': 28747, '預算': 29636 }];
+            const expData = [{ name: '營業費用', '113年同期': 2900, '實際': 2980, '預算': 3215 }];
+            const pftData = [
+                { name: '營業淨利', '113年同期': 1419, '實際': 1320, '預算': 1307 },
+                { name: '稅後淨利', '113年同期': 1194, '實際': 1089, '預算': 1081 }
+            ];
+
+            // 五年趨勢資料
+            const trendData = [
+                { year: '109年', 營業收入: 24500, 營業費用: 2600, 營業淨利: 1100, 稅後淨利: 980, 差額: 120 },
+                { year: '110年', 營業收入: 21800, 營業費用: 2750, 營業淨利: 850, 稅後淨利: 720, 差額: 130 },
+                { year: '111年', 營業收入: 25600, 營業費用: 2820, 營業淨利: 1250, 稅後淨利: 1050, 差額: 200 },
+                { year: '112年', 營業收入: 29636, 營業費用: 3215, 營業淨利: 1307, 稅後淨利: 1081, 差額: 226 },
+                { year: '113年', 營業收入: 28649, 營業費用: 2900, 營業淨利: 1419, 稅後淨利: 1194, 差額: 225, 營業收入_預估: 28649, 營業費用_預估: 2900, 營業淨利_預估: 1419, 稅後淨利_預估: 1194 },
+                { year: '114年', 營業收入_預估: 28747, 營業費用_預估: 2980, 營業淨利_預估: 1320, 稅後淨利_預估: 1089, 差額: 231 }
+            ];
+
+            return (
+                <div className="animate-fade-in w-full">
+                    <div className="mb-12">
+                        <h1 className="text-2xl font-black text-gray-900 mb-3 tracking-tight">財務儀表板</h1>
+                        <div className="flex items-center gap-2 text-sm text-gray-600">
+                            <div className="w-4 h-4 border-2 border-gray-400 rounded-sm flex items-center justify-center">
+                                <div className="w-2 h-2 bg-gray-600 rounded-sm"></div>
+                            </div>
+                            <span className="font-medium">事業群營運重點及財務數據 - 114年 1~12月總結</span>
+                        </div>
+                        <div className="mt-6 border-b border-gray-200"></div>
+                    </div>
+
+                    <div className="mb-16">
+                        {/* 第一排 3 個 KPI 環 */}
+                        <div className="flex flex-wrap justify-center gap-6 lg:gap-14 mb-8">
+                            <KPIRing title="營業收入" value={28747} rate={97.0} change={0.34} isExpense={false}
+                                tooltip="預算目標：29,636 百萬元
+去年同期：28,649 百萬元" />
+                            <KPIRing title="營業費用" value={2980} rate={92.7} change={2.77} isExpense={true}
+                                tooltip="預算目標：3,215 百萬元
+去年同期：2,900 百萬元" />
+                            <KPIRing title="營業淨利" value={1320} rate={101.03} change={-6.98} isExpense={false}
+                                tooltip="預算目標：1,307 百萬元
+去年同期：1,419 百萬元" />
+                        </div>
+
+                        {/* 外框：稅後淨利 + 中間資訊 + EPS */}
+                        <div className="max-w-3xl mx-auto border border-emerald-100 bg-white rounded-[2rem] p-6 lg:p-8 flex flex-wrap justify-center items-center gap-6 lg:gap-14 shadow-sm">
+
+                            {/* 稅後淨利大圓圈 - 移除率欄，數值放大 */}
+                            <div className="flex justify-center flex-shrink-0 relative group">
+                                <div className="w-52 h-52 rounded-full border-[6px] border-[#e8f5e9] bg-white flex flex-col items-center justify-center shadow-lg shadow-emerald-900/5 relative overflow-hidden transition-transform duration-300 hover:scale-105 cursor-pointer">
+                                    <div className="absolute inset-0 rounded-full border border-emerald-500/10 m-[2px]"></div>
+                                    <h4 className="text-sm font-semibold text-gray-600 mb-1">稅後淨利</h4>
+                                    <p className="text-5xl font-bold text-gray-900 tracking-tight">1,089</p>
+                                    <span className="text-[10px] text-gray-400 font-medium mt-1">百萬元</span>
+                                </div>
+                                <div className="absolute top-[-10px] left-1/2 transform -translate-x-1/2 -translate-y-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 w-52 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-xl border border-slate-700/50">
+                                    <div>預算目標：1,081 百萬元</div>
+                                    <div className="mt-1 pt-1 border-t border-slate-700/50">去年同期：1,194 百萬元</div>
+                                    <div className="absolute bottom-[-5px] left-1/2 transform -translate-x-1/2 w-2 h-2 bg-slate-800 rotate-45 border-r border-b border-slate-700/50"></div>
+                                </div>
+                            </div>
+
+                            {/* 中間資訊區塊 */}
+                            <div className="hidden lg:flex flex-col items-center justify-center bg-gray-50 rounded-xl px-5 py-6 border border-gray-100 min-w-[110px]">
+                                <span className="text-xs text-gray-500 mb-1">達成率</span>
+                                <span className="font-bold text-emerald-500 text-xl mb-4">100.70%</span>
+                                <span className="text-xs text-gray-500 mb-1">成長率</span>
+                                <span className="font-bold text-rose-500 text-xl">-8.79%</span>
+                            </div>
+
+                            {/* EPS 大圓圈 */}
+                            <div className="flex justify-center flex-shrink-0 relative group">
+                                <div className="w-52 h-52 rounded-full border-[6px] border-[#e8f5e9] bg-white flex flex-col items-center justify-center shadow-lg shadow-emerald-900/5 relative transition-transform duration-300 hover:scale-105 cursor-pointer">
+                                    <div className="absolute inset-0 rounded-full border border-emerald-500/10 m-[2px]"></div>
+                                    <h4 className="text-sm font-semibold text-gray-600 mb-1">EPS</h4>
+                                    <p className="text-5xl font-bold text-gray-900 tracking-tight">21.77</p>
+                                    <span className="text-xs text-gray-400 font-medium mt-1">元</span>
+                                </div>
+                                <div className="absolute top-[-10px] left-1/2 transform -translate-x-1/2 -translate-y-full opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50 w-52 p-3 bg-slate-800 text-white text-xs rounded-lg shadow-xl border border-slate-700/50">
+                                    <div>預算目標：21.62 元</div>
+                                    <div className="mt-1 pt-1 border-t border-slate-700/50">去年同期：23.87 元</div>
+                                    <div className="mt-1 pt-1 border-t border-slate-700/50">達成率：100.70%</div>
+                                    <div className="absolute bottom-[-5px] left-1/2 transform -translate-x-1/2 w-2 h-2 bg-slate-800 rotate-45 border-r border-b border-slate-700/50"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {/* 營運分析備註 - CSS Grid 疊加防跳動 */}
+                    <div className="bg-[#f1f5f9] rounded-2xl p-6 lg:p-8 mb-16 border border-gray-200 shadow-sm relative">
+                        <div className="flex items-center gap-2 mb-6">
+                            <i data-lucide="edit" className="w-5 h-5 text-gray-600"></i>
+                            <h3 className="font-bold text-gray-800 text-lg">營運分析備註</h3>
+                        </div>
+                        <div className="flex gap-2 mb-6 border-b border-gray-200 pb-4">
+                            <button onClick={() => setActiveTab('budget')} className={`px-6 py-2 rounded-full text-sm font-semibold transition-colors shadow-sm ${activeTab === 'budget' ? 'bg-[#2e7d32] text-white' : 'bg-gray-200/80 text-gray-600 hover:bg-gray-300'}`}>與預算比</button>
+                            <button onClick={() => setActiveTab('yoy')} className={`px-6 py-2 rounded-full text-sm font-semibold transition-colors shadow-sm ${activeTab === 'yoy' ? 'bg-[#2e7d32] text-white' : 'bg-gray-200/80 text-gray-600 hover:bg-gray-300'}`}>與同期實際數比</button>
+                        </div>
+                        <div className="bg-white p-6 rounded-xl border border-gray-100 shadow-sm text-[15px] leading-relaxed text-gray-700">
+                            <div className="grid">
+                                <div className={`col-start-1 row-start-1 transition-opacity duration-300 ${activeTab === 'budget' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                                    <div className="space-y-3">
+                                        <p className="font-bold text-gray-900 underline decoration-emerald-200 decoration-4">114年度與預算比較：</p>
+                                        <div className="pl-2 border-l-2 border-gray-200 space-y-2">
+                                            <p>① 114年營業收入較預算{formatAnalysisText('revenue', -889, '減少 889 百萬元')}，主係本館減少 358 百萬元，巨蛋{formatAnalysisText('revenue', 274, '增加 274 百萬元')}，台中減少 806 百萬元。</p>
+                                            <p>② 114年營業費用較預算{formatAnalysisText('expense', -235, '減少 235 百萬元')}，主係本館減少 63 百萬元，巨蛋增加 33 百萬元，台中減少 205 百萬元。</p>
+                                            <p>③ 114年稅後淨利{formatAnalysisText('profit', 1, '達預算標準')}（達成率 100.70%）。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className={`col-start-1 row-start-1 transition-opacity duration-300 ${activeTab === 'yoy' ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`}>
+                                    <div className="space-y-3">
+                                        <p className="font-bold text-gray-900 underline decoration-blue-200 decoration-4">114年度與同期比較：</p>
+                                        <div className="pl-2 border-l-2 border-gray-200 space-y-2">
+                                            <p>① 114年營業收入較同期{formatAnalysisText('revenue', 98, '增加 98 百萬元')}，主係本館減少 530 百萬元，巨蛋{formatAnalysisText('revenue', 627, '增加 627 百萬元')}。</p>
+                                            <p>② 114年營業費用較同期{formatAnalysisText('expense', 80, '增加 80 百萬元')}，主係本館減少 13 百萬元，巨蛋{formatAnalysisText('expense', 93, '增加 93 百萬元')}。</p>
+                                            <p>③ 114年稅後淨利較同期{formatAnalysisText('profit', -105, '減少 105 百萬元')}（成長率 -8.79%）。</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* 三柱對比圖表 */}
+                    <div className="mb-10">
+                        <h2 className="text-2xl font-bold flex items-center gap-3 mb-12 text-gray-800 border-l-4 border-[#2e7d32] pl-4">
+                            <i data-lucide="bar-chart-2" className="w-6 h-6 text-emerald-700"></i>
+                            預算 vs 實際 vs 同期對比（百萬元）
+                        </h2>
+                        <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
+                            <BarComparison title="營業收入對比" data={revData} />
+                            <BarComparison title="營業費用對比" data={expData} />
+                            <BarComparison title="淨利項目對比" data={pftData} />
+                        </div>
+                    </div>
+
+                    {/* 五年營運趨勢 */}
+                    <div className="mb-10 w-full">
+                        <TrendLineChart data={trendData} />
+                    </div>
+
+                </div>
+            );
+        };
+
+        // 核心修正：延遲掛載邏輯
+        window.addEventListener('load', () => {
+            try {
+                if (!window.React || !window.ReactDOM) {
+                    throw new Error("React 未正確載入。");
+                }
+                const root = ReactDOM.createRoot(document.getElementById('root'));
+                root.render(<Dashboard />);
+                console.log("v6 Dashboard rendered successfully!");
+            } catch (error) {
+                console.error("Dashboard render failed:", error);
+                document.getElementById('root').innerHTML = 
+                    `<div style="display:flex; justify-content:center; align-items:center; height:100vh; background:#f8fafc; color:#ef4444; font-family:sans-serif;">
+                        <div style="text-align:center;">
+                            <h2 style="margin-bottom:10px;">渲染失敗</h2>
+                            <p>${error.message}</p>
+                            <p style="font-size:12px; color:#64748b; margin-top:20px;">請確保已連上網路以載入 CDN 資源。</p>
+                        </div>
+                    </div>`;
+            }
+        });
+    </script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
